@@ -1,4 +1,6 @@
 /multiple-cores/node_modules
+/multiple-cores-with-queues/node_modules
 /pubsub/node_modules
 /multiple-cores/package-lock.json
+/multiple-cores-with-queues/package-lock.json
 /pubsub/package-lock.json
