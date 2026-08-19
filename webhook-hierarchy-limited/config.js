@@ -31,10 +31,10 @@ module.exports = {
   // Max customer queues a single processor worker will consume at once.
   // Each consumer = 1 channel = ~50-100KB RAM.
   // 500 consumers ≈ 25-50MB RAM just for channels.
-  MAX_CONSUMERS_PER_WORKER: 500,
+  MAX_CONSUMERS_PER_WORKER: 50,
 
   // Customer queues auto-delete after this many ms with no consumers AND no messages.
   // RabbitMQ's x-expires: queue is deleted if unused (no consumers) for this duration.
   // 5 minutes = 300000ms
-  CUSTOMER_QUEUE_EXPIRES_MS: 30000,
+  CUSTOMER_QUEUE_EXPIRES_MS: 60000,
 };
