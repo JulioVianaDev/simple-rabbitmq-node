@@ -1,0 +1,16 @@
+{
+  "name": "webhook-hierarchy-limited",
+  "version": "1.0.0",
+  "description": "Webhook hierarchy with consumer limit per worker and queue TTL auto-cleanup",
+  "main": "index.js",
+  "scripts": {
+    "api": "node api-server.js",
+    "router": "node router-worker.js",
+    "processor": "node processor-worker.js",
+    "simulate": "node simulate-webhooks.js"
+  },
+  "dependencies": {
+    "amqplib": "^0.10.9",
+    "pg": "^8.13.0"
+  }
+}
