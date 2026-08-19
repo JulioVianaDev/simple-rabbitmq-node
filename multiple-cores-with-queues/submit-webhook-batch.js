@@ -15,7 +15,7 @@ var instanceIds = [
 ];
 var messagesPerQueue = 15; // Number of messages to send to each queue
 
-amqp.connect("amqp://admin:admin@localhost:5672", function (err, conn) {
+amqp.connect("amqp://admin:admin@localhost:5675", function (err, conn) {
   if (err) {
     console.error("Connection failed:", err);
     process.exit(1);

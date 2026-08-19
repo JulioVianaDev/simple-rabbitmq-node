@@ -24,7 +24,8 @@ services:
       POSTGRES_DB: webhook_messages
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./multiple-cores-with-queues/init-db.sql:/docker-entrypoint-initdb.d/init-db.sql
+      - ./multiple-cores-with-queues/init-db.sql:/docker-entrypoint-initdb.d/01-init-db.sql
+      - ./webhook-hierarchy/init-db.sql:/docker-entrypoint-initdb.d/02-webhook-hierarchy.sql
     networks:
       - rabbitmq_network
     healthcheck:

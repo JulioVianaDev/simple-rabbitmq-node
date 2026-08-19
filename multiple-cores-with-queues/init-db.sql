@@ -18,6 +18,17 @@ CREATE INDEX IF NOT EXISTS idx_consumed_messages_consumed_at ON consumed_message
 -- Create index for ordering verification
 CREATE INDEX IF NOT EXISTS idx_consumed_messages_instance_sequence ON consumed_messages(instance_id, message_sequence);
 
+-- Create table to track active workers for load balancing
+CREATE TABLE IF NOT EXISTS active_workers (
+    worker_id VARCHAR(255) PRIMARY KEY,
+    registered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    last_heartbeat TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    worker_index INTEGER
+);
+
+-- Create index for efficient querying
+CREATE INDEX IF NOT EXISTS idx_active_workers_last_heartbeat ON active_workers(last_heartbeat);
+
 -- Function to check message ordering per instance
 CREATE OR REPLACE FUNCTION check_message_ordering(instance VARCHAR)
 RETURNS TABLE(

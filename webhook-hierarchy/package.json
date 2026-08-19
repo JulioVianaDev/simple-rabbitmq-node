@@ -1,0 +1,16 @@
+{
+  "name": "webhook-hierarchy",
+  "version": "1.0.0",
+  "description": "Multi-tenant webhook queue hierarchy with per-customer ordering",
+  "main": "index.js",
+  "scripts": {
+    "api": "node api-server.js",
+    "router": "node router-worker.js",
+    "processor": "node processor-worker.js",
+    "simulate": "node simulate-webhooks.js"
+  },
+  "dependencies": {
+    "amqplib": "^0.10.9",
+    "pg": "^8.13.0"
+  }
+}
