@@ -212,10 +212,45 @@ function discoverCustomerQueues(callback) {
           name: q.name,
           messages: q.messages || 0,       // total messages in queue
           consumers: q.consumers || 0,     // current consumer count
+          idleSince: q.idle_since || null,  // when queue became idle
         };
       });
 
     callback(null, customerQueues);
+  });
+}
+
+// --- Delete empty idle queues via Management API ---
+function cleanupIdleQueues(queues) {
+  var now = Date.now();
+  var ttl = QUEUE_EXPIRES;
+
+  queues.forEach(function (q) {
+    // Only delete if: empty, no consumers, idle for longer than TTL
+    if (q.messages > 0 || q.consumers > 0 || !q.idleSince) return;
+
+    var idleMs = now - new Date(q.idleSince).getTime();
+    if (idleMs < ttl) return;
+
+    // Delete via Management API
+    var vhost = encodeURIComponent("/");
+    var qName = encodeURIComponent(q.name);
+    var auth = Buffer.from(config.RABBITMQ_USER + ":" + config.RABBITMQ_PASS).toString("base64");
+
+    var req = http.request({
+      hostname: config.RABBITMQ_MGMT_HOST,
+      port: config.RABBITMQ_MGMT_PORT,
+      path: "/api/queues/" + vhost + "/" + qName,
+      method: "DELETE",
+      headers: { Authorization: "Basic " + auth },
+    }, function (res) {
+      if (res.statusCode === 204 || res.statusCode === 200) {
+        console.log("[CLEANUP] Deleted idle queue: %s (idle for %ds)", q.name, Math.round(idleMs / 1000));
+      }
+      res.resume();
+    });
+    req.on("error", function () {});
+    req.end();
   });
 }
 
@@ -256,11 +291,7 @@ function createConsumer(queueName) {
       delete activeConsumers[queueName];
     });
 
-    // Must match the x-expires the router used when creating the queue
-    ch.assertQueue(queueName, {
-      durable: true,
-      arguments: { "x-expires": QUEUE_EXPIRES },
-    }, function (err) {
+    ch.assertQueue(queueName, { durable: true }, function (err) {
       if (err) { console.error("[!] Assert error:", err.message); return; }
 
       ch.prefetch(1);
@@ -268,8 +299,37 @@ function createConsumer(queueName) {
       console.log("[+] Consuming: %s (active: %d/%d)", queueName,
         Object.keys(activeConsumers).length + 1, MAX_CONSUMERS);
 
+      // Drain timer: after processing a message, if no new message arrives
+      // within 2 seconds, the queue is considered "drained" (empty).
+      // If we're at the consumer limit, stop this consumer to free the slot
+      // and immediately try to pick up a queue that has pending messages.
+      var drainTimer = null;
+
+      function startDrainTimer() {
+        clearDrainTimer();
+        drainTimer = setTimeout(function () {
+          drainTimer = null;
+          // Queue has been idle for 2s after last ACK — likely empty
+          var currentCount = Object.keys(activeConsumers).length;
+          if (currentCount >= MAX_CONSUMERS) {
+            // At limit — release this slot so a queue with messages can take it
+            console.log("[DRAIN] %s is empty, freeing slot (%d/%d)", queueName, currentCount - 1, MAX_CONSUMERS);
+            stopConsumer(queueName, true);
+            // Immediately try to fill the freed slot
+            fillFreeSlots();
+          }
+        }, 2000);
+      }
+
+      function clearDrainTimer() {
+        if (drainTimer) { clearTimeout(drainTimer); drainTimer = null; }
+      }
+
       ch.consume(queueName, function (msg) {
         if (!msg) return;
+
+        // New message arrived — queue is NOT drained
+        clearDrainTimer();
 
         if (shuttingDown) {
           ch.nack(msg, false, true);
@@ -286,6 +346,7 @@ function createConsumer(queueName) {
           console.error("[!] Invalid JSON, discarding");
           ch.ack(msg);
           inFlightCount--;
+          startDrainTimer();
           return;
         }
 
@@ -293,8 +354,6 @@ function createConsumer(queueName) {
         if (activeConsumers[queueName]) activeConsumers[queueName].busy = true;
 
         processWebhook(queueName, webhookData, function () {
-          // Channel may have been closed by stopConsumer while we were processing.
-          // In that case, RabbitMQ will redeliver the message (no ACK = redelivery).
           try {
             ch.ack(msg);
           } catch (e) {
@@ -302,10 +361,15 @@ function createConsumer(queueName) {
           }
           inFlightCount--;
           if (activeConsumers[queueName]) activeConsumers[queueName].busy = false;
+
+          // After ACK, start drain timer.
+          // If another message arrives before 2s, the timer is cancelled.
+          // If no message arrives, the queue is drained and slot is freed.
+          startDrainTimer();
         });
       }, { noAck: false }, function (err, ok) {
         if (err) { console.error("[!] Consume error:", err.message); return; }
-        activeConsumers[queueName] = { channel: ch, consumerTag: ok.consumerTag, busy: false };
+        activeConsumers[queueName] = { channel: ch, consumerTag: ok.consumerTag, busy: false, clearDrain: clearDrainTimer };
       });
     });
   });
@@ -331,6 +395,9 @@ function stopConsumer(queueName, force) {
   console.log("[-] Stopping: %s (active: %d/%d)", queueName,
     Object.keys(activeConsumers).length - 1, MAX_CONSUMERS);
 
+  // Clear drain timer if exists
+  if (consumer.clearDrain) consumer.clearDrain();
+
   if (consumer.consumerTag && consumer.channel) {
     consumer.channel.cancel(consumer.consumerTag, function () {
       try { consumer.channel.close(); } catch (e) {}
@@ -339,6 +406,45 @@ function stopConsumer(queueName, force) {
     try { consumer.channel.close(); } catch (e) {}
   }
   delete activeConsumers[queueName];
+}
+
+// --- Fill free slots with queues that have pending messages ---
+// Called after a consumer is drained (queue empty) and stopped.
+// Lightweight: queries the Management API for queues with messages,
+// filters to ours (consistent hashing), and starts consumers.
+var fillInProgress = false;
+function fillFreeSlots() {
+  if (fillInProgress) return;
+  fillInProgress = true;
+
+  var availableSlots = MAX_CONSUMERS - Object.keys(activeConsumers).length;
+  if (availableSlots <= 0) { fillInProgress = false; return; }
+
+  discoverCustomerQueues(function (err, queues) {
+    fillInProgress = false;
+    if (err) return;
+
+    // Filter to my queues with messages, not already consuming
+    var candidates = queues.filter(function (q) {
+      if (activeConsumers[q.name]) return false;
+      if (q.messages === 0) return false;
+      return (hashToInt(q.name) % lastKnownWorkerCount) === lastKnownMyIndex;
+    });
+
+    // Sort by message count desc
+    candidates.sort(function (a, b) { return b.messages - a.messages; });
+
+    var toStart = Math.min(candidates.length, availableSlots);
+    for (var i = 0; i < toStart; i++) {
+      console.log("[FILL] Starting consumer for %s (%d msgs pending)", candidates[i].name, candidates[i].messages);
+      createConsumer(candidates[i].name);
+    }
+
+    if (toStart > 0) {
+      console.log("[FILL] Started %d new consumers, %d still waiting",
+        toStart, Math.max(0, candidates.length - toStart));
+    }
+  });
 }
 
 // --- Discovery & balancing with consumer limit ---
@@ -426,6 +532,12 @@ function discoverAndBalance() {
         total, myQueues.length,
         Object.keys(activeConsumers).length + started, MAX_CONSUMERS,
         Math.max(0, waitingQueues));
+
+      // Step 5: Cleanup empty idle queues (replaces x-expires)
+      // Only worker 0 does cleanup to avoid race conditions
+      if (myIndex === 0) {
+        cleanupIdleQueues(queues);
+      }
     });
   });
 }

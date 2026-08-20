@@ -314,12 +314,10 @@ function publishToCustomerQueue(tenantId, instanceId, customerId, data, callback
 
   publishChannel.assertQueue(queueName, {
     durable: true,
-    arguments: {
-      // Auto-delete queue after x-expires ms with no consumers AND no messages.
-      // Timer starts when last consumer disconnects AND queue is empty.
-      // New message or consumer reconnect resets the timer.
-      "x-expires": config.CUSTOMER_QUEUE_EXPIRES_MS,
-    },
+    // No x-expires here! x-expires deletes the queue after N ms without consumers,
+    // EVEN IF the queue has messages. That causes message loss when MAX_CONSUMERS
+    // is lower than the total number of queues (queues wait for a consumer slot).
+    // Cleanup of empty idle queues is done explicitly by the processor instead.
   }, function (err) {
     if (err) {
       console.error("[!] Failed to assert queue:", queueName, err.message);
