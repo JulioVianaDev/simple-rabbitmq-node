@@ -53,7 +53,7 @@ pgClient.connect(function (err) {
     process.exit(1);
   }
 
-  var query = "SELECT id, customer_id, instance_id, body, sequence, worker_id, processed_at " +
+  var query = "SELECT id, customer_id, instance_id, body, sequence, worker_id, webhook_received_at, processed_at " +
     "FROM processed_messages WHERE body LIKE $1 ORDER BY customer_id, instance_id, processed_at";
 
   pgClient.query(query, [manifest.testId + "-%"], function (err, result) {
@@ -194,8 +194,57 @@ pgClient.connect(function (err) {
       console.log("    %s → workers: %s", c.customer, c.workers.join(", "));
     });
 
-    // --- 7. PENDING ---
-    console.log("\n--- 7. PENDING IN QUEUES ---");
+    // --- 7. LATENCY ---
+    console.log("\n--- 7. LATENCY (received → processed) ---");
+    var latencies = [];
+    rows.forEach(function (r) {
+      if (r.webhook_received_at && r.processed_at) {
+        var receivedMs = new Date(r.webhook_received_at).getTime();
+        var processedMs = new Date(r.processed_at).getTime();
+        var latencyMs = processedMs - receivedMs;
+        latencies.push({
+          customer: r.customer_id,
+          seq: r.sequence,
+          body: r.body,
+          latencyMs: latencyMs,
+          received: r.webhook_received_at,
+          processed: r.processed_at,
+          worker: r.worker_id,
+        });
+      }
+    });
+
+    if (latencies.length > 0) {
+      latencies.sort(function (a, b) { return b.latencyMs - a.latencyMs; });
+
+      var sum = 0;
+      latencies.forEach(function (l) { sum += l.latencyMs; });
+      var avg = Math.round(sum / latencies.length);
+      var p50 = latencies[Math.floor(latencies.length * 0.5)].latencyMs;
+      var p95 = latencies[Math.floor(latencies.length * 0.05)].latencyMs;
+      var p99 = latencies[Math.floor(latencies.length * 0.01)].latencyMs;
+      var max = latencies[0].latencyMs;
+      var min = latencies[latencies.length - 1].latencyMs;
+
+      console.log("  Total msgs with latency: %d", latencies.length);
+      console.log("  Min:    %d ms", min);
+      console.log("  Avg:    %d ms", avg);
+      console.log("  P50:    %d ms", p50);
+      console.log("  P95:    %d ms", p95);
+      console.log("  P99:    %d ms", p99);
+      console.log("  Max:    %d ms", max);
+
+      console.log("\n  Top 10 slowest messages:");
+      latencies.slice(0, 10).forEach(function (l, i) {
+        console.log("    %d. %s seq=%d → %d ms (customer=%s, worker=%s)",
+          i + 1, l.body, l.seq, l.latencyMs, l.customer, l.worker);
+      });
+    } else {
+      console.log("  No latency data (webhook_received_at missing)");
+    }
+
+    // --- 8. PENDING ---
+    console.log("\n--- 8. PENDING IN QUEUES ---");
     checkPendingQueues(function (pending) {
       var pendingPass = pending === 0;
       if (pending === -1) {
